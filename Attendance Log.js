@@ -9,6 +9,13 @@
  * - Personal ID in Attendance Log is Column B.
  * - Destination rows WITHOUT Personal ID in Column B are NOT used for matching.
  * - If no match, script adds a new row (same as original behavior).
+ *
+ * NEW FIX (per your latest request):
+ * 1) Do NOT add a new person row unless we are actually able to CHECK attendance (i.e., the target date/event column exists).
+ * 2) Do NOT add a new person row if the Personal ID already exists in ANY of:
+ *    - Sunday Service
+ *    - Event Attendance
+ *    - Pastoral Check-In
  */
 function processAttendanceLogV2() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -91,7 +98,6 @@ function processAttendanceLogV2() {
     const eventName = row[logEventNameIndex];
     let eventDate = row[logEventDateIndex];
 
-    // We accept missing first OR last name (per your note), but Personal ID is expected for strong matching.
     // If there's absolutely no name and no Personal ID, skip.
     if (!personalId && !lastNameRaw && !firstNameRaw) {
       continue;
@@ -177,6 +183,12 @@ function processAttendanceLogV2() {
     Logger.log('Warning: "' + pastoralSheetName + '" not found. Skipping.');
   }
 
+  // Build "global" Personal ID set across all three tabs (for "do not add if already exists anywhere")
+  const globalPidSet = new Set();
+  if (sunServiceData && sunServiceData.pidSet) sunServiceData.pidSet.forEach(function (v) { globalPidSet.add(v); });
+  if (eventSheetData && eventSheetData.pidSet) eventSheetData.pidSet.forEach(function (v) { globalPidSet.add(v); });
+  if (pastoralData && pastoralData.pidSet) pastoralData.pidSet.forEach(function (v) { globalPidSet.add(v); });
+
   // 3) Process records in memory
   let recordsWereLogged = false;
   const processedLogs = new Set();
@@ -213,7 +225,22 @@ function processAttendanceLogV2() {
             processedLogs.add(logKey);
           }
         } else if (!rowNum) {
-          // Add new row
+          // NEW RULE #1: Do NOT add a row unless we can actually check attendance (date column exists)
+          if (!colNum) {
+            logData[logDataIndex][logRemarksColIndex] = 'Skipped: Date not found in Sunday Service sheet (no checkbox to mark).';
+            recordsWereLogged = true;
+            continue;
+          }
+
+          // NEW RULE #2: Do NOT add if Personal ID already exists in ANY tab
+          const pid = (record.personalId || '').toString().trim();
+          if (pid && globalPidSet.has(pid)) {
+            logData[logDataIndex][logRemarksColIndex] = 'Skipped: Personal ID already exists in another tab.';
+            recordsWereLogged = true;
+            continue;
+          }
+
+          // Add new row (only now, because we CAN mark attendance)
           const nextRow = sunServiceData.nextBlankRow;
 
           // Column B = Personal ID, Column C = Last, Column D = First
@@ -224,24 +251,29 @@ function processAttendanceLogV2() {
           SpreadsheetApp.flush();
 
           sunServiceData.keyMap.set(record.key, nextRow);
+          if (pid) {
+            sunServiceData.pidSet.add(pid);
+            globalPidSet.add(pid);
+          }
 
           const numCols = sunServiceData.checkboxes[0] ? sunServiceData.checkboxes[0].length : 0;
           const newCheckboxRow = Array(numCols).fill(false);
 
-          if (colNum) {
-            const arrayCol = colNum - sunServiceDataStartCol;
+          const arrayCol = colNum - sunServiceDataStartCol;
+          if (arrayCol >= 0 && arrayCol < newCheckboxRow.length) {
             newCheckboxRow[arrayCol] = true;
             logData[logDataIndex][logStatusColIndex] = 'Logged';
             logData[logDataIndex][logRemarksColIndex] = 'New person added.';
             processedLogs.add(logKey);
           } else {
-            logData[logDataIndex][logRemarksColIndex] = 'New person added, but event date not found.';
+            logData[logDataIndex][logRemarksColIndex] = 'New person added, but checkbox column not found.';
           }
 
           sunServiceData.checkboxes.push(newCheckboxRow);
           sunServiceData.numRows++;
           sunServiceData.nextBlankRow++;
           recordsWereLogged = true;
+
         } else if (rowNum && !colNum) {
           logData[logDataIndex][logRemarksColIndex] = 'Date not found in Sunday Service sheet.';
           recordsWereLogged = true;
@@ -282,6 +314,14 @@ function processAttendanceLogV2() {
           processedLogs.add(logKey);
 
         } else {
+          // NEW RULE #2: Do NOT add if Personal ID already exists in ANY tab
+          const pid = (record.personalId || '').toString().trim();
+          if (pid && globalPidSet.has(pid)) {
+            logData[logDataIndex][logRemarksColIndex] = 'Skipped: Personal ID already exists in another tab.';
+            recordsWereLogged = true;
+            continue;
+          }
+
           // Add new row
           const nextRow = pastoralData.nextBlankRow;
 
@@ -306,6 +346,11 @@ function processAttendanceLogV2() {
           SpreadsheetApp.flush();
 
           pastoralData.keyMap.set(record.key, nextRow);
+          if (pid) {
+            pastoralData.pidSet.add(pid);
+            globalPidSet.add(pid);
+          }
+
           pastoralData.nextBlankRow++;
           pastoralData.numRows++;
 
@@ -381,7 +426,15 @@ function processAttendanceLogV2() {
             processedLogs.add(logKey);
           }
         } else {
-          // Add new row
+          // NEW RULE #2: Do NOT add if Personal ID already exists in ANY tab
+          const pid = (record.personalId || '').toString().trim();
+          if (pid && globalPidSet.has(pid)) {
+            logData[logDataIndex][logRemarksColIndex] = 'Skipped: Personal ID already exists in another tab.';
+            recordsWereLogged = true;
+            continue;
+          }
+
+          // Add new row (Event Attendance always has a real checkbox column here because colNum exists)
           const nextRow = eventSheetData.nextBlankRow;
 
           if (record.personalId) eventSheet.getRange(nextRow, 2).setValue(record.personalId); // B
@@ -392,6 +445,10 @@ function processAttendanceLogV2() {
           SpreadsheetApp.flush();
 
           eventSheetData.keyMap.set(record.key, nextRow);
+          if (pid) {
+            eventSheetData.pidSet.add(pid);
+            globalPidSet.add(pid);
+          }
 
           const numCols = eventSheetData.checkboxes[0] ? eventSheetData.checkboxes[0].length : 0;
           const newCheckboxRow = Array(numCols).fill(false);
@@ -474,6 +531,7 @@ function normalizeKeyPart_(v) {
 /**
  * Reads destination sheet and builds:
  * - keyMap: key -> row number (ONLY for rows that have Personal ID in Column B)
+ * - pidSet: set of ALL Personal IDs present in Column B (data area)
  * - dateMap: date/event -> column
  * - checkboxes: grid values
  * - nextBlankRow: first truly empty row (based on B/C/D)
@@ -496,13 +554,18 @@ function prepareSheetDataWithPersonalId_(sheet, dataStartRow, dataStartCol, date
   const dataRowCount = actualLastDataRow >= dataStartRow ? (actualLastDataRow - dataStartRow + 1) : 0;
 
   // Build keyMap ONLY for rows with Personal ID in Col B
+  // Build pidSet for ALL Personal IDs in Col B
   const keyMap = new Map();
+  const pidSet = new Set();
+
   if (dataRowCount > 0) {
     const slice = bcdAll.slice(dataStartRow - 1, actualLastDataRow);
     for (let i = 0; i < slice.length; i++) {
       const pid = (slice[i][0] || '').toString().trim(); // Col B
       const ln = (slice[i][1] || '').toString().trim();  // Col C
       const fn = (slice[i][2] || '').toString().trim();  // Col D
+
+      if (pid) pidSet.add(pid);
 
       if (!pid) continue; // IMPORTANT: no Personal ID -> do NOT use for matching
 
@@ -565,6 +628,7 @@ function prepareSheetDataWithPersonalId_(sheet, dataStartRow, dataStartCol, date
   return {
     sheet: sheet,
     keyMap: keyMap,
+    pidSet: pidSet,
     dateMap: dateMap,
     checkboxes: checkboxes,
     lastDataCol: lastDataCol,
@@ -575,7 +639,7 @@ function prepareSheetDataWithPersonalId_(sheet, dataStartRow, dataStartCol, date
 
 /**
  * Pastoral Check-In helper:
- * builds keyMap + nextBlankRow based on B/C/D,
+ * builds keyMap + pidSet + nextBlankRow based on B/C/D,
  * but ONLY maps rows that have Personal ID in Col B.
  */
 function preparePastoralSheetDataWithPersonalId_(sheet, dataStartRow) {
@@ -595,12 +659,16 @@ function preparePastoralSheetDataWithPersonalId_(sheet, dataStartRow) {
   const dataRowCount = actualLastDataRow >= dataStartRow ? (actualLastDataRow - dataStartRow + 1) : 0;
 
   const keyMap = new Map();
+  const pidSet = new Set();
+
   if (dataRowCount > 0) {
     const slice = bcdAll.slice(dataStartRow - 1, actualLastDataRow);
     for (let i = 0; i < slice.length; i++) {
       const pid = (slice[i][0] || '').toString().trim();
       const ln = (slice[i][1] || '').toString().trim();
       const fn = (slice[i][2] || '').toString().trim();
+
+      if (pid) pidSet.add(pid);
 
       if (!pid) continue; // IMPORTANT: no Personal ID -> do NOT use for matching
 
@@ -614,6 +682,7 @@ function preparePastoralSheetDataWithPersonalId_(sheet, dataStartRow) {
   return {
     sheet: sheet,
     keyMap: keyMap,
+    pidSet: pidSet,
     numRows: dataRowCount,
     nextBlankRow: nextBlankRow
   };
@@ -632,41 +701,12 @@ function capitalizeName(nameStr) {
     });
 }
 
-
-
 /**
  * Reverse of processAttendanceLogV2:
  * Reads checkboxes from "Sunday Service" and "Event Attendance"
  * and writes attendance rows into "Attendance Log".
  *
- * - Sunday Service:
- *   - Data starts at row 4.
- *   - Last name in Col C, first name in Col D.
- *   - Dates are in row 2 (starting at Col I / index 9).
- *   - If checkbox is TRUE, log a row:
- *     - Col A: unique id (e.g. "7a60d5eb").
- *     - Col B: "FirstName LastName".
- *     - Col C: Last Name.
- *     - Col D: First Name.
- *     - Col F: "Sunday Service".
- *     - Col G: Date from row 2.
- *     - Col H: Timestamp (now).
- *     - Col I: "Logged".
- *
- * - Event Attendance:
- *   - Data starts at row 5.
- *   - Last name in Col C, first name in Col D.
- *   - Dates in row 2, event names in row 3.
- *   - Only use columns where:
- *       Row 2 has a date AND
- *       Row 3 has an event name AND
- *       Row 3 is NOT "Post event name here".
- *   - For each TRUE checkbox:
- *     - Same mapping as above, but Col F = event name (row 3).
- *
- * - Prevents duplicate log rows by checking existing
- *   (LastName, FirstName, EventName, Date) combinations
- *   already in "Attendance Log".
+ * (UNCHANGED)
  */
 function exportSheetsAttendanceToLogV2() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -681,12 +721,10 @@ function exportSheetsAttendanceToLogV2() {
 
   const timezone = ss.getSpreadsheetTimeZone() || 'GMT';
 
-  // --- Helper: generate 8-char hex ID like "7a60d5eb" ---
   function generateUniqueId_() {
     return Math.random().toString(16).slice(2, 10);
   }
 
-  // --- Helper: normalize key for dedupe (lname, fname, event, date) ---
   function makeKey_(lastName, firstName, eventName, dateObjOrStr) {
     if (!lastName || !firstName || !eventName || !dateObjOrStr) return '';
     let dateKey;
@@ -708,19 +746,16 @@ function exportSheetsAttendanceToLogV2() {
     ].join('|');
   }
 
-  // --- Build set of existing log keys so we don't duplicate ---
   const existingKeys = new Set();
   const lastLogRow = logSheet.getLastRow();
   if (lastLogRow > 1) {
-    // Read Col C (Last), D (First), F (Event), G (Date)
     const existingRange = logSheet.getRange(2, 1, lastLogRow - 1, 7).getValues();
-    // [A,B,C,D,E,F,G]
     for (let i = 0; i < existingRange.length; i++) {
       const row = existingRange[i];
-      const lastName = row[2];  // Col C
-      const firstName = row[3]; // Col D
-      const eventName = row[5]; // Col F
-      const dateVal = row[6];   // Col G
+      const lastName = row[2];
+      const firstName = row[3];
+      const eventName = row[5];
+      const dateVal = row[6];
       const key = makeKey_(lastName, firstName, eventName, dateVal);
       if (key) existingKeys.add(key);
     }
@@ -728,9 +763,7 @@ function exportSheetsAttendanceToLogV2() {
 
   const newRows = [];
   const newKeys = new Set();
-  const now = new Date();
 
-  // --- Helper: push a new log row if not duplicate ---
   function maybeAddLogRow_(lastName, firstName, eventName, dateVal) {
     if (!lastName && !firstName) return;
     if (!eventName || !dateVal) return;
@@ -752,24 +785,22 @@ function exportSheetsAttendanceToLogV2() {
     const fullName = `${firstName || ''} ${lastName || ''}`.trim();
     const uniqueId = generateUniqueId_();
 
-    // Col A–I: [ID, FullName, LastName, FirstName, (Type blank), EventName, EventDate, Timestamp, Status]
     newRows.push([
       uniqueId,
       fullName,
       lastName || '',
       firstName || '',
-      '',                    // Col E (Type) – left blank
+      '',
       eventName,
       dateObj,
-      new Date(),            // Col H: timestamp (now)
-      'Logged'               // Col I: status
+      new Date(),
+      'Logged'
     ]);
   }
 
-  // --- 1) From "Sunday Service" ---
   if (sunServiceSheet) {
-    const sunDataStartRow = 4;   // data row 4
-    const sunDataStartCol = 9;   // column I
+    const sunDataStartRow = 4;
+    const sunDataStartCol = 9;
     const lastRow = sunServiceSheet.getLastRow();
     const lastCol = sunServiceSheet.getLastColumn();
 
@@ -777,7 +808,7 @@ function exportSheetsAttendanceToLogV2() {
       const numRows = lastRow - sunDataStartRow + 1;
       const numCols = lastCol - sunDataStartCol + 1;
 
-      const nameValues = sunServiceSheet.getRange(sunDataStartRow, 3, numRows, 2).getValues(); // C–D
+      const nameValues = sunServiceSheet.getRange(sunDataStartRow, 3, numRows, 2).getValues();
       const checkboxValues = sunServiceSheet.getRange(sunDataStartRow, sunDataStartCol, numRows, numCols).getValues();
       const dateRowValues = sunServiceSheet.getRange(2, sunDataStartCol, 1, numCols).getValues()[0];
 
@@ -801,10 +832,9 @@ function exportSheetsAttendanceToLogV2() {
     Logger.log('Sheet "Sunday Service" not found.');
   }
 
-  // --- 2) From "Event Attendance" ---
   if (eventSheet) {
-    const evtDataStartRow = 5;   // data row 5
-    const evtDataStartCol = 9;   // column I
+    const evtDataStartRow = 5;
+    const evtDataStartCol = 9;
     const lastRow = eventSheet.getLastRow();
     const lastCol = eventSheet.getLastColumn();
 
@@ -812,7 +842,7 @@ function exportSheetsAttendanceToLogV2() {
       const numRows = lastRow - evtDataStartRow + 1;
       const numCols = lastCol - evtDataStartCol + 1;
 
-      const nameValues = eventSheet.getRange(evtDataStartRow, 3, numRows, 2).getValues(); // C–D
+      const nameValues = eventSheet.getRange(evtDataStartRow, 3, numRows, 2).getValues();
       const checkboxValues = eventSheet.getRange(evtDataStartRow, evtDataStartCol, numRows, numCols).getValues();
 
       const dateRowValues = eventSheet.getRange(2, evtDataStartCol, 1, numCols).getValues()[0];
@@ -822,10 +852,6 @@ function exportSheetsAttendanceToLogV2() {
         const dateVal = dateRowValues[c];
         const eventName = eventNameValues[c];
 
-        // Only process if:
-        // - Row 2 has date
-        // - Row 3 has event name
-        // - Row 3 is NOT "Post event name here"
         if (!dateVal) continue;
         if (!eventName) continue;
         if (String(eventName).trim() === 'Post event name here') continue;
@@ -845,7 +871,6 @@ function exportSheetsAttendanceToLogV2() {
     Logger.log('Sheet "Event Attendance" not found.');
   }
 
-  // --- Write new rows into Attendance Log ---
   if (newRows.length > 0) {
     const startRow = lastLogRow > 1 ? lastLogRow + 1 : 2;
     logSheet.getRange(startRow, 1, newRows.length, 9).setValues(newRows);
