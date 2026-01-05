@@ -116,8 +116,14 @@ function processAttendanceLogV2() {
 
     if (!eventName || !(eventDate instanceof Date)) continue;
 
-    const formattedFullDate = (eventDate.getMonth() + 1) + '-' + eventDate.getDate() + '-' + eventDate.getFullYear();
-    const formattedShortDate = (eventDate.getMonth() + 1) + '-' + eventDate.getDate();
+    const tz = ss.getSpreadsheetTimeZone() || 'GMT';
+
+// force DATE-ONLY (removes time so it won't shift days)
+eventDate = new Date(eventDate.getFullYear(), eventDate.getMonth(), eventDate.getDate());
+
+const formattedFullDate = Utilities.formatDate(eventDate, tz, 'M-d-yyyy');
+const formattedShortDate = Utilities.formatDate(eventDate, tz, 'M-d');
+
 
     const key = buildAttendanceKey_(personalId, lastNameRaw, firstNameRaw);
 
@@ -637,13 +643,138 @@ function prepareSheetDataWithPersonalId_(sheet, dataStartRow, dataStartCol, date
   };
 }
 
-/**
- * Pastoral Check-In helper:
- * builds keyMap + pidSet + nextBlankRow based on B/C/D,
- * but ONLY maps rows that have Personal ID in Col B.
- */
+function prepareSheetDataWithPersonalId_(sheet, dataStartRow, dataStartCol, dateKeyRows, useFullDate, isEventSheet) {
+  // Find last row based on any data in B/C/D
+  const bcdAll = sheet.getRange('B1:D' + sheet.getMaxRows()).getValues();
+  let actualLastDataRow = 0;
+  for (let i = bcdAll.length - 1; i >= 0; i--) {
+    const pid = bcdAll[i][0];
+    const ln = bcdAll[i][1];
+    const fn = bcdAll[i][2];
+    if (pid || ln || fn) {
+      actualLastDataRow = i + 1;
+      break;
+    }
+  }
+
+  const nextBlankRow = actualLastDataRow < dataStartRow ? dataStartRow : actualLastDataRow + 1;
+  const dataRowCount = actualLastDataRow >= dataStartRow ? (actualLastDataRow - dataStartRow + 1) : 0;
+
+  // Build keyMap ONLY for rows with Personal ID in Col B
+  // Build pidSet for ALL Personal IDs in Col B
+  const keyMap = new Map();
+  const pidSet = new Set();
+
+  if (dataRowCount > 0) {
+    const slice = bcdAll.slice(dataStartRow - 1, actualLastDataRow);
+    for (let i = 0; i < slice.length; i++) {
+      const pid = (slice[i][0] || '').toString().trim(); // Col B
+      const ln = (slice[i][1] || '').toString().trim();  // Col C
+      const fn = (slice[i][2] || '').toString().trim();  // Col D
+
+      if (pid) pidSet.add(pid);
+      if (!pid) continue; // IMPORTANT: no Personal ID -> do NOT use for matching
+
+      const key = buildAttendanceKey_(pid, ln, fn);
+      if (key && !keyMap.has(key)) keyMap.set(key, i + dataStartRow);
+    }
+  }
+
+  // Build Date-to-Column Map
+  const dateMap = new Map();
+  const lastSheetCol = sheet.getLastColumn() || dataStartCol;
+
+  const dateValues = sheet.getRange(dateKeyRows[0], 1, 1, lastSheetCol).getValues()[0];
+  const nameValues = dateKeyRows[1] ? sheet.getRange(dateKeyRows[1], 1, 1, lastSheetCol).getValues()[0] : null;
+
+  let lastDataCol = dataStartCol - 1;
+
+  // IMPORTANT FIX: use spreadsheet timezone-safe formatting
+  const tz = sheet.getParent().getSpreadsheetTimeZone() || 'GMT';
+  const fmtShort = 'M-d';
+  const fmtFull = 'M-d-yyyy';
+
+  for (let i = dataStartCol - 1; i < lastSheetCol; i++) {
+    const raw = dateValues[i];
+    let keyDate = '';
+
+    if (raw instanceof Date) {
+      keyDate = Utilities.formatDate(raw, tz, useFullDate ? fmtFull : fmtShort);
+
+    } else if (typeof raw === 'string' && raw.trim()) {
+      const cleaned = raw.trim().replace(/\//g, '-');
+      const parts = cleaned.split('-').map(function (p) { return p.trim(); });
+
+      // Accept: M-D, M-D-YYYY, M/D, M/D/YYYY
+      if (parts.length === 2 || parts.length === 3) {
+        const m = parseInt(parts[0], 10);
+        const d = parseInt(parts[1], 10);
+        const y = (parts.length === 3) ? parseInt(parts[2], 10) : null;
+
+        if (!isNaN(m) && !isNaN(d) && m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+          if (useFullDate) {
+            if (y && !isNaN(y)) {
+              keyDate = m + '-' + d + '-' + y;
+            } else {
+              // can't build full-date key without year
+              keyDate = '';
+            }
+          } else {
+            keyDate = m + '-' + d;
+          }
+        }
+      }
+    }
+
+    if (keyDate) {
+      let key;
+      if (nameValues) {
+        const eventName = nameValues[i] ? nameValues[i].toString().trim().toLowerCase() : '';
+        key = keyDate + '_' + eventName;
+      } else {
+        key = keyDate;
+      }
+
+      dateMap.set(key, i + 1);
+      lastDataCol = i + 1;
+
+    } else if (raw === '' && (!nameValues || nameValues[i] === '')) {
+      break;
+    } else if (i >= dataStartCol - 1) {
+      lastDataCol = i + 1;
+    }
+  }
+
+  // Get checkbox values
+  const numCols = lastDataCol >= dataStartCol ? (lastDataCol - dataStartCol + 1) : 0;
+  let checkboxes = [];
+
+  if (dataRowCount > 0) {
+    if (numCols > 0) {
+      const range = sheet.getRange(dataStartRow, dataStartCol, dataRowCount, numCols);
+      checkboxes = range.getValues();
+      if (isEventSheet) range.insertCheckboxes();
+    } else {
+      checkboxes = Array(dataRowCount).fill(0).map(function () { return []; });
+    }
+  }
+
+  return {
+    sheet: sheet,
+    keyMap: keyMap,
+    pidSet: pidSet,
+    dateMap: dateMap,
+    checkboxes: checkboxes,
+    lastDataCol: lastDataCol,
+    numRows: dataRowCount,
+    nextBlankRow: nextBlankRow
+  };
+}
+
 function preparePastoralSheetDataWithPersonalId_(sheet, dataStartRow) {
   const bcdAll = sheet.getRange('B1:D' + sheet.getMaxRows()).getValues();
+
+  // Find actual last data row based on any data in B/C/D
   let actualLastDataRow = 0;
   for (let i = bcdAll.length - 1; i >= 0; i--) {
     const pid = bcdAll[i][0];
@@ -663,14 +794,16 @@ function preparePastoralSheetDataWithPersonalId_(sheet, dataStartRow) {
 
   if (dataRowCount > 0) {
     const slice = bcdAll.slice(dataStartRow - 1, actualLastDataRow);
+
     for (let i = 0; i < slice.length; i++) {
-      const pid = (slice[i][0] || '').toString().trim();
-      const ln = (slice[i][1] || '').toString().trim();
-      const fn = (slice[i][2] || '').toString().trim();
+      const pid = (slice[i][0] || '').toString().trim(); // Col B
+      const ln = (slice[i][1] || '').toString().trim();  // Col C
+      const fn = (slice[i][2] || '').toString().trim();  // Col D
 
       if (pid) pidSet.add(pid);
 
-      if (!pid) continue; // IMPORTANT: no Personal ID -> do NOT use for matching
+      // IMPORTANT: no Personal ID -> do NOT use for matching
+      if (!pid) continue;
 
       const key = buildAttendanceKey_(pid, ln, fn);
       if (key && !keyMap.has(key)) {
@@ -687,6 +820,7 @@ function preparePastoralSheetDataWithPersonalId_(sheet, dataStartRow) {
     nextBlankRow: nextBlankRow
   };
 }
+
 
 /**
  * Capitalizes the first letter of each part of a name.
