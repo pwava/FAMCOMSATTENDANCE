@@ -416,6 +416,11 @@ function matchOrAssignBelCodes() {
  * FIXED: Column M returns full event name even if it contains hyphens,
  * and Pastoral Check-In is forced to exact label.
  *
+ * UPDATED (per request):
+ * - Attendance Stats output includes anyone who attended ANY event (any year).
+ * - Q1–Q4 + Total still count ONLY 2026 attendance.
+ * - Last Date / Last Event still use MOST RECENT attendance overall (any year).
+ *
  * IMPORTANT CHANGE:
  * - Grouping is by PersonalID+Last+First match key (stored at index 7 in raw records).
  * - Guest detection includes matching Personal ID.
@@ -449,6 +454,7 @@ function calculateAttendanceStats() {
 
   const grouped = new Map(); // matchKey -> records[]
 
+  // Keep ALL years in grouped (so everyone with ANY attendance is included)
   rawData.forEach(row => {
     if (row.length < 8) return;
 
@@ -462,9 +468,6 @@ function calculateAttendanceStats() {
 
     const date = dateVal instanceof Date ? dateVal : new Date(String(dateVal));
     if (isNaN(date.getTime())) return;
-
-    // Only count records inside 2026 for Q/Totals/Last Event (2026)
-    if (date.getFullYear() !== reportYear) return;
 
     const isSundayService = /sunday service/i.test(eventName);
     const eventKey = isSundayService
@@ -493,13 +496,16 @@ function calculateAttendanceStats() {
           q3Events = new Set(),
           q4Events = new Set();
 
+    // Q1–Q4 counts ONLY for 2026 dates (still)
     records.forEach(r => {
+      if (r.date.getFullYear() !== reportYear) return;
       if (r.date >= q1_start && r.date <= q1_end) q1Events.add(r.eventKey);
       if (r.date >= q2_start && r.date <= q2_end) q2Events.add(r.eventKey);
       if (r.date >= q3_start && r.date <= q3_end) q3Events.add(r.eventKey);
       if (r.date >= q4_start && r.date <= q4_end) q4Events.add(r.eventKey);
     });
 
+    // Last Date / Last Event should reflect MOST RECENT attendance overall
     records.sort((a, b) => b.date.getTime() - a.date.getTime());
     const mostRecentRecord = records[0];
 
@@ -748,6 +754,7 @@ function runManualUpdate() {
   updateAttendanceStatsSheet();
   SpreadsheetApp.getUi().alert('The "Attendance Stats" sheet has been successfully updated.');
 }
+
 function ensurePersonalIdsAcrossAttendanceTabs_ForSpreadsheet_(ss) {
   // --- External Directory ---
   let externalDirectorySs = null;
